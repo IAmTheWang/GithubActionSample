@@ -1,0 +1,26 @@
+# GitHub 会在仓库 60 天无活动后自动停用 schedule 触发的 workflow (disabled_inactivity)。
+# 这里每月 re-enable 一次，重置 60 天计时，防止天气推送被停用。
+
+name: 保活 (防止定时任务被停用)
+
+on:
+  schedule:
+    # UTC 每月 1 日 00:00 (JST 09:00)，间隔最长 31 天，小于 60 天
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Re-enable scheduled workflows
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        gh workflow enable weather_report.yml
+        gh workflow enable keepalive.yml
+        gh workflow enable daily_sign.yml
