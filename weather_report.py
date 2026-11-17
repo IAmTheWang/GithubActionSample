@@ -2,6 +2,27 @@
 import os
 import requests
 import json
+import time
+
+# 所有外部请求统一的超时(秒)和重试次数，避免第三方接口卡住导致整个任务失败/挂起
+REQUEST_TIMEOUT = 10
+REQUEST_RETRIES = 3
+
+
+def _request(method, url, **kwargs):
+    last_err = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            resp = requests.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            last_err = e
+            print(f"Request failed ({attempt}/{REQUEST_RETRIES}): {url.split('?')[0]} -> {e}")
+            if attempt < REQUEST_RETRIES:
+                time.sleep(2 * attempt)
+    raise last_err
+
 
 # 从测试号信息获取
 appID = os.environ.get("APP_ID")
@@ -69,7 +90,7 @@ def get_weather(my_city):
         raise ValueError(f"Unsupported city: {my_city}, please add a JMA region mapping in CITY_AREA_MAP first")
 
     url = f"https://www.jma.go.jp/bosai/forecast/data/forecast/{city_info['area_code']}.json"
-    forecast = requests.get(url).json()[0]
+    forecast = _request("GET", url).json()[0]
 
     region_series = forecast["timeSeries"][0]
     region = next(a for a in region_series["areas"] if a["area"]["name"] == city_info["region_name"])
@@ -96,7 +117,7 @@ def get_uv_index(my_city):
 
     url = (f"https://api.open-meteo.com/v1/forecast?latitude={city_info['lat']}&longitude={city_info['lon']}"
            "&hourly=uv_index&timezone=Asia%2FTokyo&forecast_days=1")
-    hourly = requests.get(url).json()["hourly"]
+    hourly = _request("GET", url).json()["hourly"]
 
     # 只展示白天时段(6:00-18:00)的逐时紫外线指数，夜间恒为0没有展示意义
     parts = []
@@ -111,7 +132,7 @@ def get_access_token():
     # 获取access token的url
     url = 'https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={}&secret={}' \
         .format(appID.strip(), appSecret.strip())
-    response = requests.get(url).json()
+    response = _request("GET", url).json()
     print(response)
     access_token = response.get('access_token')
     return access_token
@@ -120,9 +141,13 @@ def get_access_token():
 def get_daily_quote():
     # 每日一句英文名言
     url = "https://zenquotes.io/api/random"
-    r = requests.get(url)
-    quote = json.loads(r.text)[0]
-    return f"{quote['q']} — {quote['a']}"
+    try:
+        quote = _request("GET", url).json()[0]
+        return f"{quote['q']} — {quote['a']}"
+    except Exception as e:
+        # 每日一句只是装饰信息，获取失败不应影响天气推送
+        print(f"Failed to get daily quote: {e}")
+        return "N/A"
 
 
 def send_weather(access_token, weather, uv_index):
@@ -164,7 +189,7 @@ def send_weather(access_token, weather, uv_index):
         }
     }
     url = 'https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={}'.format(access_token)
-    print(requests.post(url, json.dumps(body)).text)
+    print(_request("POST", url, data=json.dumps(body)).text)
 
 
 
@@ -173,7 +198,12 @@ def weather_report(this_city):
     access_token = get_access_token()
     # 2. 获取天气
     weather = get_weather(this_city)
-    uv_index = get_uv_index(this_city)
+    try:
+        uv_index = get_uv_index(this_city)
+    except Exception as e:
+        # 紫外线指数只是附加信息，获取失败时仍然推送天气
+        print(f"Failed to get UV index: {e}")
+        uv_index = "N/A"
     print(f"Weather info: {weather}, UV index: {uv_index}")
     # 3. 发送消息
     send_weather(access_token, weather, uv_index)
